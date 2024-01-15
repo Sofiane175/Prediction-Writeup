@@ -1,0 +1,234 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Sofiane B"
+date: "2024-01-15"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. 
+
+## Libraries and Data importation 
+
+```{r, message=FALSE, warning=FALSE}
+library('dplyr')
+library('tidyr')
+library('data.table')
+library('caret')
+library('randomForest')
+
+url_train <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+
+url_test <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+if (!file.exists('Dataset/pml-training.csv')) {
+        download.file(url_train,"Dataset/pml-training.csv")
+}
+
+
+if (!file.exists('Dataset/pml-testing.csv')) {
+        download.file(url_test,"Dataset/pml-testing.csv")
+}
+
+pml.train <- fread("Dataset/pml-training.csv")
+
+pml.valid <- fread("Dataset/pml-testing.csv")
+
+```
+
+The number of observations and variables in the two datasets are :
+```{r}
+dim(pml.train)
+dim(pml.valid)
+```
+
+
+## Data processing
+
+The first 7 variables were removed as they are not from accelerometers on the belt, forearm, arm, and dumbell measurements. 
+```{r}
+pml.train <- pml.train[,-c(1:7)]
+pml.valid <- pml.valid[,-c(1:7)]
+## Remove the first 7 column and 
+colmiss <- which(colSums(is.na(pml.train))/nrow(pml.train)> 0.5)
+
+pml.train <- pml.train %>%
+        select(-any_of(c(colmiss)))
+
+
+pml.valid <- pml.valid %>%
+        select(-any_of(c(colmiss,"problem_id")))
+
+pml.train$classe <- as.factor(pml.train$classe)
+
+```
+ 
+100 columns have more than 50% of missing data. These variables are removed from the analysis.
+```{r}
+length(colmiss)
+```
+
+The Training data set was partitioned into two data sets : 
+
+- A training data set having 75% of observations to train the model. 
+- A testing data set having 25% of observations to test the model.
+
+
+```{r}
+set.seed(123)
+inTrain <- createDataPartition(y=c(pml.train$class),p=3/4,
+                               list=FALSE)
+
+train <- pml.train[inTrain,]
+test <- pml.train[-inTrain,]
+```
+
+The following variables are highly correlated *(coefficient of correlation >0.8)*. 
+
+```{r}
+M <- abs(cor(train[,-53]))
+diag(M) <- 0
+
+
+## Correlated variables
+
+var_cor <- which(M>0.8,arr.ind=T) %>%
+                rownames() %>% unique()
+
+var_cor
+```
+
+A principal component analysis (PCA) was performed and the first 6 principal components were used in the model. The first 6 components explain 90% of the variance of these 22 variables. The remaining variables are centred and scaled.
+
+```{r}
+pp_pca <- train %>%
+        select(any_of(var_cor)) %>%
+        preProcess(method='pca',thresh=0.9)
+
+pc_train =predict(pp_pca,newdata= train %>%
+                select(all_of(var_cor)))
+
+```
+
+
+```{r}
+## training data removed var correlated 
+
+train_wo_cor <- train %>%
+        select(-any_of(var_cor)) 
+
+pp_scale <- train_wo_cor %>%
+        preProcess(method=c('center','scale'))
+
+### trainied data scaled with 6 PCs
+train_scaled <- predict(pp_scale, train_wo_cor)  %>% 
+        cbind(pc_train)
+
+```
+
+## Prediction model: Random Forest
+
+Models will be generated using random forests on the centered and scaled trained dataset and the first 6 components of the 22 correlated variables.
+
+```{r, cache=FALSE}
+
+modelRF <- randomForest(classe~., data=train_scaled,importance=TRUE,
+                        proximity=TRUE)
+
+```
+
+The test data were processed in the same way as the training set in order to estimated the accuracy of the model.
+
+The accuracy is around 99% and the out-of-sample errors is 1%.
+```{r}
+#### ¨Prediction RF
+
+pc_test =predict(pp_pca,newdata= test %>%
+                    select(all_of(var_cor)))
+
+
+## training data removed var correlated 
+
+test_wo_cor <- test %>%
+        select(-any_of(var_cor)) 
+
+### trainied data scaled with 6 PCs
+test_scaled <- predict(pp_scale, test_wo_cor)  %>% 
+        cbind(pc_test)
+
+
+prediction_rf_test <- predict(modelRF,newdata=test_scaled) 
+confusionMatrix(prediction_rf_test,test$classe)
+
+```
+
+The following plot show Dotchart of variable importance of the top 10 predictors as measured by a Random Forest.
+
+
+```{r}
+
+varImpPlot(modelRF,n.var=10)
+
+```
+
+The density plot of some predictors (top 4) is shown in the following plots for indicative purpose.
+
+```{r}
+
+train %>%
+        ggplot(aes(x=magnet_dumbbell_z,col=classe)) +
+        geom_density()
+
+
+
+train %>%
+        ggplot(aes(x=roll_forearm,col=classe)) +
+        geom_density()
+
+
+
+train %>%
+        ggplot(aes(x=magnet_belt_y,col=classe)) +
+        geom_density()
+
+train %>%
+        ggplot(aes(x=pitch_forearm,col=classe)) +
+        geom_density()
+```
+
+
+## Submission
+
+The model was used to predict 20 different test cases of *pml.validation* data.
+```{r}
+
+### Validation prediction 
+
+pc_valid =predict(pp_pca,newdata= pml.valid %>%
+                         select(all_of(var_cor)))
+
+## training data removed var correlated 
+
+valid_wo_cor <- pml.valid %>%
+        select(-any_of(var_cor)) 
+
+
+
+### trainied data scaled with 2 PCs
+valid_scaled <- predict(pp_scale, valid_wo_cor)  %>% 
+        cbind(pc_valid)
+
+
+predict(modelRF,valid_scaled) 
+
+```
